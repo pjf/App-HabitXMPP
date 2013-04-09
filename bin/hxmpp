@@ -1,0 +1,113 @@
+#!/usr/bin/perl -w
+use 5.010;
+use strict;
+use warnings;
+use autodie;
+
+use AnyEvent::XMPP::Client;
+use AnyEvent;
+
+use WebService::HabitRPG;
+
+use IO::Handle;
+
+STDOUT->autoflush(1);
+
+my $user  = $ENV{HXMPP_USER}  || shift || die "Usage $0 user pass [owner]\n";
+my $pass  = $ENV{HXMPP_PASS}  || shift || die "Usage $0 user pass [owner]\n";
+my $owner = $ENV{HXMPP_OWNER} || shift ;
+
+my $j = AnyEvent->condvar;
+
+my $cl = AnyEvent::XMPP::Client->new( debug => 1 );
+
+$cl->add_account($user, $pass);
+
+if ($owner) {
+    $cl->reg_cb(
+        stream_ready => sub {
+            $cl->send_message('Hello World', $owner);
+        }
+    );
+}
+
+# Auto-subscribe to everyone who follows us.
+
+$cl->reg_cb(
+    contact_request_subscribe => sub {
+        my ($client, $account, $roster, $contact, $message) = @_;
+        $contact->send_subscribed;
+    }
+);
+
+# Receive messages
+
+my %user_id;
+my %api_token;
+my %hrpg;
+
+$cl->reg_cb(
+    message => sub {
+        my ($client, $account, $msg) = @_;
+
+        my $reply = $msg->make_reply();
+        my $from  = $msg->from;
+
+        given ("$msg") {
+            when ('help') {
+                $reply->add_body(
+                      "Known commands:\n\n"
+                    . "user_id = ...\n"
+                    . "api_token = ...\n"
+                    . "tasks\n"
+                );
+            }
+
+            when (/^user_id\s*=\s*(?<user_id>\S+)/) {
+                $user_id{$from} = $+{user_id};
+                delete $hrpg{$from};
+                $reply->add_body("user_id set to '$+{user_id}'");
+            }
+
+            when (/^api_token\s*=\s*(?<token>\S+)/) {
+                $api_token{$from} = $+{token};
+                delete $hrpg{$from};
+                $reply->add_body("api_token set to '$+{token}'");
+            }
+
+            when('tasks') {
+                unless($user_id{$from} and $api_token{$from}) {
+                    $reply->add_body("Please auth first");
+                }
+                else {
+                    $hrpg{$from} ||= WebService::HabitRPG->new(
+                        api_token => $api_token{$from},
+                        user_id   => $user_id{$from},
+                    );
+
+                    my $tasks = $hrpg{$from}->tasks;
+
+                    my $body = "";
+
+                    foreach my $task (@$tasks) {
+                        $body .= $task->format_task . "\n";
+                    }
+
+                    $reply->add_body("Tasks for $from\n\n".$body);
+                }
+            }
+
+            default {
+                $reply->add_body("That's nice. Try 'help' for help.");
+            }
+        }
+
+        $reply->send;
+    }
+);
+
+$cl->start;
+
+$j->wait;
+
+
